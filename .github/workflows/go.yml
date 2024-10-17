@@ -37,7 +37,7 @@ jobs:
       - name: Package binary
         run: |
           cd build/${{ matrix.os }}_${{ matrix.arch }}
-          tar -czf ../smartctl_exporter_${{ matrix.os }}_${{ matrix.arch }}.tar.gz smartctl_exporter
+          tar -czf ../smartctl_exporter-${{ VERSION }}.${{ matrix.os }}-${{ matrix.arch }}.tar.gz smartctl_exporter
           cd ../..
 
       - name: Upload artifacts
