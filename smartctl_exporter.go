@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "0.0.4"
+const version = "0.0.5"
 
 type Device struct {
 	Name         string
@@ -45,7 +45,7 @@ var (
 	satTypes       = []string{"sat", "usbjmicron", "usbprolific", "usbsunplus"}
 	nvmeTypes      = []string{"nvme", "sntasmedia", "sntjmicron", "sntrealtek"}
 	scsiTypes      = []string{"scsi"}
-	megaraidRegexp = regexp.MustCompile(`(sat\+)?(megaraid,\d+)`)
+	megaraidRegexp = regexp.MustCompile(`(sat\+)?(megaraid,(\d+))`)
 	mutex          = &sync.Mutex{}
 )
 
@@ -53,7 +53,8 @@ func runSmartctlCmd(args []string) ([]byte, int, error) {
 	cmd := exec.Command("smartctl", args...)
 	output, err := cmd.CombinedOutput()
 	exitCode := cmd.ProcessState.ExitCode()
-	if err != nil {
+	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
+		// Exit codes 2 and 6 indicate SMART errors but still provide valid output
 		log.Printf("WARNING: Command '%s' returned exit code %d. Output: '%s'", strings.Join(cmd.Args, " "), exitCode, string(output))
 	}
 	return output, exitCode, err
@@ -218,7 +219,7 @@ func getMegaraidDeviceType(dev, typ string) string {
 
 func getMegaraidDeviceID(typ string) string {
 	matches := megaraidRegexp.FindStringSubmatch(typ)
-	if len(matches) >= 3 {
+	if len(matches) >= 4 {
 		return matches[2]
 	}
 	return ""
@@ -241,6 +242,10 @@ func collect() {
 		} else if contains(scsiTypes, typ) {
 			attrs = smartScsi(drive)
 		} else {
+			continue
+		}
+
+		if attrs == nil {
 			continue
 		}
 
@@ -271,8 +276,8 @@ func collect() {
 }
 
 func smartSat(dev string) map[string]float64 {
-	output, _, err := runSmartctlCmd([]string{"-A", "-H", "-d", "sat", "--json=c", dev})
-	if err != nil {
+	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", "sat", "--json=c", dev})
+	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
 		log.Println("Error running smartctl for SAT:", err)
 		return nil
 	}
@@ -315,8 +320,8 @@ func smartSat(dev string) map[string]float64 {
 }
 
 func smartNvme(dev string) map[string]float64 {
-	output, _, err := runSmartctlCmd([]string{"-A", "-H", "-d", "nvme", "--json=c", dev})
-	if err != nil {
+	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", "nvme", "--json=c", dev})
+	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
 		log.Println("Error running smartctl for NVMe:", err)
 		return nil
 	}
@@ -344,6 +349,8 @@ func smartNvme(dev string) map[string]float64 {
 			for i, sensorValue := range v {
 				if val, ok := sensorValue.(float64); ok {
 					attributes[fmt.Sprintf("%s_sensor%d", key, i+1)] = val
+				} else if valInt, ok := sensorValue.(int); ok {
+					attributes[fmt.Sprintf("%s_sensor%d", key, i+1)] = float64(valInt)
 				}
 			}
 		}
@@ -354,8 +361,8 @@ func smartNvme(dev string) map[string]float64 {
 }
 
 func smartScsi(dev string) map[string]float64 {
-	output, _, err := runSmartctlCmd([]string{"-A", "-H", "-d", "scsi", "--json=c", dev})
-	if err != nil {
+	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", "scsi", "--json=c", dev})
+	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
 		log.Println("Error running smartctl for SCSI:", err)
 		return nil
 	}
@@ -375,10 +382,11 @@ func smartScsi(dev string) map[string]float64 {
 			attributes[key] = float64(v)
 		case map[string]interface{}:
 			for subKey, subValue := range v {
-				if val, ok := subValue.(float64); ok {
+				switch val := subValue.(type) {
+				case float64:
 					attributes[key+"_"+subKey] = val
-				} else if valInt, ok := subValue.(int); ok {
-					attributes[key+"_"+subKey] = float64(valInt)
+				case int:
+					attributes[key+"_"+subKey] = float64(val)
 				}
 			}
 		}
@@ -394,8 +402,8 @@ func smartScsi(dev string) map[string]float64 {
 }
 
 func smartMegaraid(dev, megaraidID string) map[string]float64 {
-	output, _, err := runSmartctlCmd([]string{"-A", "-H", "-d", megaraidID, "--json=c", dev})
-	if err != nil {
+	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", megaraidID, "--json=c", dev})
+	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
 		log.Println("Error running smartctl for MegaRAID:", err)
 		return nil
 	}
@@ -414,7 +422,8 @@ func smartMegaraid(dev, megaraidID string) map[string]float64 {
 				} `json:"raw"`
 			} `json:"table"`
 		} `json:"ata_smart_attributes"`
-		SmartStatus struct {
+		ScsiAttributes map[string]interface{} `json:"scsi_grown_defect_list"`
+		SmartStatus    struct {
 			Passed bool `json:"passed"`
 		} `json:"smart_status"`
 	}
@@ -437,6 +446,14 @@ func smartMegaraid(dev, megaraidID string) map[string]float64 {
 			}
 		}
 	} else if result.Device.Protocol == "SCSI" {
+		for key, value := range result.ScsiAttributes {
+			switch v := value.(type) {
+			case float64:
+				attributes[key] = v
+			case int:
+				attributes[key] = float64(v)
+			}
+		}
 	}
 
 	attributes["smart_passed"] = boolToFloat(result.SmartStatus.Passed)
@@ -482,11 +499,12 @@ func contains(slice []string, item string) bool {
 }
 
 func main() {
+
 	envAddress := os.Getenv("SMARTCTL_EXPORTER_ADDRESS")
 	envPort := os.Getenv("SMARTCTL_EXPORTER_PORT")
 	envIntervalStr := os.Getenv("SMARTCTL_REFRESH_INTERVAL")
 
-	// Set comand line flags with pflag
+	// Define flags with pflag
 	showVersion := pflag.Bool("version", false, "Show the version and exit")
 	flagAddress := pflag.String("address", "", "Address to listen on")
 	flagPort := pflag.String("port", "", "Port to listen on")
