@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "0.0.5"
+const version = "0.0.6"
 
 type Device struct {
 	Name         string
@@ -408,55 +408,87 @@ func smartMegaraid(dev, megaraidID string) map[string]float64 {
 		return nil
 	}
 
-	var result struct {
-		Device struct {
-			Protocol string `json:"protocol"`
-		} `json:"device"`
-		AtaSmartAttributes struct {
-			Table []struct {
-				ID    int    `json:"id"`
-				Name  string `json:"name"`
-				Value int    `json:"value"`
-				Raw   struct {
-					String string `json:"string"`
-				} `json:"raw"`
-			} `json:"table"`
-		} `json:"ata_smart_attributes"`
-		ScsiAttributes map[string]interface{} `json:"scsi_grown_defect_list"`
-		SmartStatus    struct {
-			Passed bool `json:"passed"`
-		} `json:"smart_status"`
-	}
-
+	var result map[string]interface{}
 	if err := json.Unmarshal(output, &result); err != nil {
 		log.Println("Error parsing MegaRAID JSON:", err)
 		return nil
 	}
 
 	attributes := make(map[string]float64)
-	if result.Device.Protocol == "ATA" {
-		for _, attr := range result.AtaSmartAttributes.Table {
-			name := attr.Name
-			value := float64(attr.Value)
-			rawValue := parseRawValue(attr.Raw.String)
+
+	// Determine device protocol
+	deviceInfo, ok := result["device"].(map[string]interface{})
+	if !ok {
+		log.Println("Cannot find device protocol")
+		return nil
+	}
+
+	protocol, ok := deviceInfo["protocol"].(string)
+	if !ok {
+		log.Println("Cannot determine device protocol")
+		return nil
+	}
+
+	if protocol == "ATA" {
+		// ATA device on MegaRAID
+		ataSmartAttributes, ok := result["ata_smart_attributes"].(map[string]interface{})
+		if !ok {
+			log.Println("Cannot find ATA SMART attributes")
+			return nil
+		}
+
+		table, ok := ataSmartAttributes["table"].([]interface{})
+		if !ok {
+			log.Println("Cannot find ATA SMART attributes table")
+			return nil
+		}
+
+		for _, item := range table {
+			attr, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			name, _ := attr["name"].(string)
+			value, _ := attr["value"].(float64)
+			raw, _ := attr["raw"].(map[string]interface{})
+			rawString, _ := raw["string"].(string)
+			rawValue := parseRawValue(rawString)
 
 			attributes[name] = value
 			if rawValue != nil {
 				attributes[name+"_raw"] = *rawValue
 			}
 		}
-	} else if result.Device.Protocol == "SCSI" {
-		for key, value := range result.ScsiAttributes {
+	} else if protocol == "SCSI" {
+		// SCSI device on MegaRAID
+		// Finding attributes
+		for key, value := range result {
 			switch v := value.(type) {
 			case float64:
 				attributes[key] = v
 			case int:
 				attributes[key] = float64(v)
+			case map[string]interface{}:
+				for subKey, subValue := range v {
+					switch val := subValue.(type) {
+					case float64:
+						attributes[key+"_"+subKey] = val
+					case int:
+						attributes[key+"_"+subKey] = float64(val)
+					}
+				}
 			}
 		}
 	}
 
-	attributes["smart_passed"] = boolToFloat(result.SmartStatus.Passed)
+	// Processing SMART status
+	if smartStatus, ok := result["smart_status"].(map[string]interface{}); ok {
+		if passed, ok := smartStatus["passed"].(bool); ok {
+			attributes["smart_passed"] = boolToFloat(passed)
+		}
+	}
+
 	return attributes
 }
 
