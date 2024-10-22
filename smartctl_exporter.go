@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "0.0.6"
+const version = "0.0.7"
 
 type Device struct {
 	Name         string
@@ -275,6 +275,29 @@ func collect() {
 	}
 }
 
+func parseAttributes(prefix string, data map[string]interface{}, attributes map[string]float64) {
+    for key, value := range data {
+        fullKey := key
+        if prefix != "" {
+            fullKey = prefix + "_" + key
+        }
+        switch v := value.(type) {
+        case float64:
+            attributes[fullKey] = v
+        case int:
+            attributes[fullKey] = float64(v)
+        case bool:
+            if v {
+                attributes[fullKey] = 1
+            } else {
+                attributes[fullKey] = 0
+            }
+        case map[string]interface{}:
+            parseAttributes(fullKey, v, attributes)
+        }
+    }
+}
+
 func smartSat(dev string) map[string]float64 {
 	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", "sat", "--json=c", dev})
 	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
@@ -339,23 +362,7 @@ func smartNvme(dev string) map[string]float64 {
 	}
 
 	attributes := make(map[string]float64)
-	for key, value := range result.NvmeSmartHealthInformationLog {
-		switch v := value.(type) {
-		case float64:
-			attributes[key] = v
-		case int:
-			attributes[key] = float64(v)
-		case []interface{}:
-			for i, sensorValue := range v {
-				if val, ok := sensorValue.(float64); ok {
-					attributes[fmt.Sprintf("%s_sensor%d", key, i+1)] = val
-				} else if valInt, ok := sensorValue.(int); ok {
-					attributes[fmt.Sprintf("%s_sensor%d", key, i+1)] = float64(valInt)
-				}
-			}
-		}
-	}
-
+    parseAttributes("", result.NvmeSmartHealthInformationLog, attributes)
 	attributes["smart_passed"] = boolToFloat(result.SmartStatus.Passed)
 	return attributes
 }
@@ -374,120 +381,13 @@ func smartScsi(dev string) map[string]float64 {
 	}
 
 	attributes := make(map[string]float64)
-	for key, value := range result {
-		switch v := value.(type) {
-		case float64:
-			attributes[key] = v
-		case int:
-			attributes[key] = float64(v)
-		case map[string]interface{}:
-			for subKey, subValue := range v {
-				switch val := subValue.(type) {
-				case float64:
-					attributes[key+"_"+subKey] = val
-				case int:
-					attributes[key+"_"+subKey] = float64(val)
-				}
-			}
-		}
-	}
+    parseAttributes("", result, attributes)
 
-	if smartStatus, ok := result["smart_status"].(map[string]interface{}); ok {
-		if passed, ok := smartStatus["passed"].(bool); ok {
-			attributes["smart_passed"] = boolToFloat(passed)
-		}
-	}
-
-	return attributes
-}
-
-func smartMegaraid(dev, megaraidID string) map[string]float64 {
-	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", megaraidID, "--json=c", dev})
-	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
-		log.Println("Error running smartctl for MegaRAID:", err)
-		return nil
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(output, &result); err != nil {
-		log.Println("Error parsing MegaRAID JSON:", err)
-		return nil
-	}
-
-	attributes := make(map[string]float64)
-
-	// Determine device protocol
-	deviceInfo, ok := result["device"].(map[string]interface{})
-	if !ok {
-		log.Println("Cannot find device protocol")
-		return nil
-	}
-
-	protocol, ok := deviceInfo["protocol"].(string)
-	if !ok {
-		log.Println("Cannot determine device protocol")
-		return nil
-	}
-
-	if protocol == "ATA" {
-		// ATA device on MegaRAID
-		ataSmartAttributes, ok := result["ata_smart_attributes"].(map[string]interface{})
-		if !ok {
-			log.Println("Cannot find ATA SMART attributes")
-			return nil
-		}
-
-		table, ok := ataSmartAttributes["table"].([]interface{})
-		if !ok {
-			log.Println("Cannot find ATA SMART attributes table")
-			return nil
-		}
-
-		for _, item := range table {
-			attr, ok := item.(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			name, _ := attr["name"].(string)
-			value, _ := attr["value"].(float64)
-			raw, _ := attr["raw"].(map[string]interface{})
-			rawString, _ := raw["string"].(string)
-			rawValue := parseRawValue(rawString)
-
-			attributes[name] = value
-			if rawValue != nil {
-				attributes[name+"_raw"] = *rawValue
-			}
-		}
-	} else if protocol == "SCSI" {
-		// SCSI device on MegaRAID
-		// Finding attributes
-		for key, value := range result {
-			switch v := value.(type) {
-			case float64:
-				attributes[key] = v
-			case int:
-				attributes[key] = float64(v)
-			case map[string]interface{}:
-				for subKey, subValue := range v {
-					switch val := subValue.(type) {
-					case float64:
-						attributes[key+"_"+subKey] = val
-					case int:
-						attributes[key+"_"+subKey] = float64(val)
-					}
-				}
-			}
-		}
-	}
-
-	// Processing SMART status
-	if smartStatus, ok := result["smart_status"].(map[string]interface{}); ok {
-		if passed, ok := smartStatus["passed"].(bool); ok {
-			attributes["smart_passed"] = boolToFloat(passed)
-		}
-	}
+    // Удаляем ненужные ключи
+    delete(attributes, "json_format_version")
+    delete(attributes, "smartctl")
+    delete(attributes, "device")
+    delete(attributes, "smart_status")
 
 	return attributes
 }
