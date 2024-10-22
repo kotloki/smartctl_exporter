@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "0.1.2"
+const version = "0.1.3"
 
 type Device struct {
 	Name         string
@@ -53,8 +53,8 @@ func runSmartctlCmd(args []string) ([]byte, int, error) {
 	cmd := exec.Command("smartctl", args...)
 	output, err := cmd.CombinedOutput()
 	exitCode := cmd.ProcessState.ExitCode()
-	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
-		// Exit codes 2 and 6 indicate SMART errors but still provide valid output
+    if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 4 && exitCode != 6 {
+        // Exit codes 2, 4, and 6 indicate SMART errors but still provide valid output
 		log.Printf("WARNING: Command '%s' returned exit code %d. Output: '%s'", strings.Join(cmd.Args, " "), exitCode, string(output))
 	}
 	return output, exitCode, err
@@ -96,7 +96,7 @@ func getDrives() map[string]*Device {
 			diskAttrs.Type = getMegaraidDeviceType(dev, typ)
 			diskAttrs.BusDevice = dev
 			diskAttrs.MegaraidID = getMegaraidDeviceID(typ)
-			// Creating unique namespace
+            // Form a unique device name
 			diskAttrs.Name = dev + "_" + diskAttrs.MegaraidID
             disks[diskAttrs.Name] = diskAttrs
             log.Printf("Discovered device %s with attributes %+v\n", diskAttrs.Name, disks[diskAttrs.Name])
@@ -304,7 +304,7 @@ func parseAttributes(prefix string, data map[string]interface{}, attributes map[
 
 func smartMegaraid(dev, megaraidID string) map[string]float64 {
     output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", megaraidID, "--json=c", dev})
-    if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
+    if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 4 && exitCode != 6 {
         log.Println("Error running smartctl for MegaRAID:", err)
         return nil
     }
@@ -317,7 +317,7 @@ func smartMegaraid(dev, megaraidID string) map[string]float64 {
 
     attributes := make(map[string]float64)
 
-    // Define device protocol
+    // Determine device protocol
     deviceInfo, ok := result["device"].(map[string]interface{})
     if !ok {
         log.Println("Cannot find device protocol")
@@ -352,11 +352,11 @@ func smartMegaraid(dev, megaraidID string) map[string]float64 {
         }
     } else if protocol == "SCSI" {
         // SCSI device on MegaRAID
-        // Parse JSON data
+        // Recursively parse the JSON and extract all numeric values
         parseAttributes("", result, attributes)
     }
 
-    // Удаляем ненужные ключи
+    // Remove unnecessary keys
     delete(attributes, "json_format_version")
     delete(attributes, "smartctl")
     delete(attributes, "device")
@@ -370,7 +370,7 @@ func smartMegaraid(dev, megaraidID string) map[string]float64 {
 
 func smartSat(dev string) map[string]float64 {
 	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", "sat", "--json=c", dev})
-	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
+    if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 4 && exitCode != 6 {
 		log.Println("Error running smartctl for SAT:", err)
 		return nil
 	}
@@ -414,7 +414,7 @@ func smartSat(dev string) map[string]float64 {
 
 func smartNvme(dev string) map[string]float64 {
 	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", "nvme", "--json=c", dev})
-	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
+    if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 4 && exitCode != 6 {
 		log.Println("Error running smartctl for NVMe:", err)
 		return nil
 	}
@@ -439,7 +439,7 @@ func smartNvme(dev string) map[string]float64 {
 
 func smartScsi(dev string) map[string]float64 {
 	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", "scsi", "--json=c", dev})
-	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
+    if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 4 && exitCode != 6 {
 		log.Println("Error running smartctl for SCSI:", err)
 		return nil
 	}
@@ -453,7 +453,7 @@ func smartScsi(dev string) map[string]float64 {
 	attributes := make(map[string]float64)
     parseAttributes("", result, attributes)
 
-    // Remove unused keys
+    // Remove unnecessary keys
     delete(attributes, "json_format_version")
     delete(attributes, "smartctl")
     delete(attributes, "device")
@@ -511,12 +511,12 @@ func contains(slice []string, item string) bool {
 }
 
 func main() {
-	// Read env variables
+
 	envAddress := os.Getenv("SMARTCTL_EXPORTER_ADDRESS")
 	envPort := os.Getenv("SMARTCTL_EXPORTER_PORT")
 	envIntervalStr := os.Getenv("SMARTCTL_REFRESH_INTERVAL")
 
-	// Define flags with pflag
+    // Define flags using pflag
 	showVersion := pflag.Bool("version", false, "Show the version and exit")
 	flagAddress := pflag.String("address", "", "Address to listen on")
 	flagPort := pflag.String("port", "", "Port to listen on")
@@ -529,7 +529,7 @@ func main() {
 		return
 	}
 
-	// Set defaults
+    // Set default values
 	address := "0.0.0.0"
 	if *flagAddress != "" {
 		address = *flagAddress
@@ -553,10 +553,10 @@ func main() {
 		}
 	}
 
-	// Device inicialization
+    // Initialize devices
 	devices = getDrives()
 
-	// Run HTTP-server
+    // Run HTTP server
 	http.Handle("/metrics", promhttp.Handler())
 	serverAddress := fmt.Sprintf("%s:%s", address, port)
 	log.Printf("Server listening on http://%s/metrics", serverAddress)
@@ -566,7 +566,7 @@ func main() {
 		}
 	}()
 
-	// Starting a metrics collection cycle 
+    // Start metrics collection cycle
 	ticker := time.NewTicker(time.Duration(refreshInterval) * time.Second)
 	defer ticker.Stop()
 
