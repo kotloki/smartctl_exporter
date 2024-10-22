@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "0.0.9"
+const version = "0.1.1"
 
 type Device struct {
 	Name         string
