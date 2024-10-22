@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "0.1.1"
+const version = "0.1.2"
 
 type Device struct {
 	Name         string
@@ -98,14 +98,15 @@ func getDrives() map[string]*Device {
 			diskAttrs.MegaraidID = getMegaraidDeviceID(typ)
 			// Creating unique namespace
 			diskAttrs.Name = dev + "_" + diskAttrs.MegaraidID
-			devices[diskAttrs.Name] = diskAttrs
+            disks[diskAttrs.Name] = diskAttrs
+            log.Printf("Discovered device %s with attributes %+v\n", diskAttrs.Name, disks[diskAttrs.Name])
 		} else {
 			diskAttrs := getDeviceInfo(dev)
 			diskAttrs.Type = typ
 			diskAttrs.Name = dev
-			devices[dev] = diskAttrs
+            disks[dev] = diskAttrs
+            log.Printf("Discovered device %s with attributes %+v\n", dev, disks[dev])
 		}
-		log.Printf("Discovered device %s with attributes %+v\n", devices[dev].Name, devices[dev])
 	}
 
 	return disks
@@ -232,17 +233,18 @@ func collect() {
 	defer mutex.Unlock()
 
 	for _, device := range devices {
+        drive := device.Name
 		typ := device.Type
 		var attrs map[string]float64
 
 		if device.MegaraidID != "" {
 			attrs = smartMegaraid(device.BusDevice, device.MegaraidID)
 		} else if contains(satTypes, typ) {
-			attrs = smartSat(device.Name)
+            attrs = smartSat(drive)
 		} else if contains(nvmeTypes, typ) {
-			attrs = smartNvme(device.Name)
+            attrs = smartNvme(drive)
 		} else if contains(scsiTypes, typ) {
-			attrs = smartScsi(device.Name)
+            attrs = smartScsi(drive)
 		} else {
 			continue
 		}
@@ -266,8 +268,8 @@ func collect() {
 			}
 
 			metrics[metricName].With(prometheus.Labels{
-				"drive":         sanitizeLabelValue(device.Name),
-				"type":          device.Type,
+                "drive":         sanitizeLabelValue(drive),
+                "type":          typ,
 				"model_family":  device.ModelFamily,
 				"model_name":    device.ModelName,
 				"serial_number": device.SerialNumber,
@@ -298,6 +300,72 @@ func parseAttributes(prefix string, data map[string]interface{}, attributes map[
             parseAttributes(fullKey, v, attributes)
         }
     }
+}
+
+func smartMegaraid(dev, megaraidID string) map[string]float64 {
+    output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", megaraidID, "--json=c", dev})
+    if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
+        log.Println("Error running smartctl for MegaRAID:", err)
+        return nil
+    }
+
+    var result map[string]interface{}
+    if err := json.Unmarshal(output, &result); err != nil {
+        log.Println("Error parsing MegaRAID JSON:", err)
+        return nil
+    }
+
+    attributes := make(map[string]float64)
+
+    // Define device protocol
+    deviceInfo, ok := result["device"].(map[string]interface{})
+    if !ok {
+        log.Println("Cannot find device protocol")
+        return nil
+    }
+
+    protocol, ok := deviceInfo["protocol"].(string)
+    if !ok {
+        log.Println("Cannot determine device protocol")
+        return nil
+    }
+
+    if protocol == "ATA" {
+        // ATA device on MegaRAID
+        if ataSmartAttributes, ok := result["ata_smart_attributes"].(map[string]interface{}); ok {
+            if table, ok := ataSmartAttributes["table"].([]interface{}); ok {
+                for _, item := range table {
+                    if attr, ok := item.(map[string]interface{}); ok {
+                        name, _ := attr["name"].(string)
+                        value, _ := attr["value"].(float64)
+                        raw, _ := attr["raw"].(map[string]interface{})
+                        rawString, _ := raw["string"].(string)
+                        rawValue := parseRawValue(rawString)
+
+                        attributes[name] = value
+                        if rawValue != nil {
+                            attributes[name+"_raw"] = *rawValue
+                        }
+                    }
+                }
+            }
+        }
+    } else if protocol == "SCSI" {
+        // SCSI device on MegaRAID
+        // Parse JSON data
+        parseAttributes("", result, attributes)
+    }
+
+    // Удаляем ненужные ключи
+    delete(attributes, "json_format_version")
+    delete(attributes, "smartctl")
+    delete(attributes, "device")
+    delete(attributes, "ata_smart_attributes")
+    delete(attributes, "scsi_grown_defect_list")
+    delete(attributes, "scsi_error_counter_log")
+    delete(attributes, "smart_status")
+
+    return attributes
 }
 
 func smartSat(dev string) map[string]float64 {
@@ -390,75 +458,6 @@ func smartScsi(dev string) map[string]float64 {
     delete(attributes, "smartctl")
     delete(attributes, "device")
     delete(attributes, "smart_status")
-
-	return attributes
-}
-
-func smartMegaraid(dev, megaraidID string) map[string]float64 {
-	output, exitCode, err := runSmartctlCmd([]string{"-A", "-H", "-d", megaraidID, "--json=c", dev})
-	if err != nil && exitCode != 0 && exitCode != 2 && exitCode != 6 {
-		log.Println("Error running smartctl for MegaRAID:", err)
-		return nil
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(output, &result); err != nil {
-		log.Println("Error parsing MegaRAID JSON:", err)
-		return nil
-	}
-
-	attributes := make(map[string]float64)
-
-	// Determine device protocol
-	deviceInfo, ok := result["device"].(map[string]interface{})
-	if !ok {
-		log.Println("Cannot find device protocol")
-		return nil
-	}
-
-	protocol, ok := deviceInfo["protocol"].(string)
-	if !ok {
-		log.Println("Cannot determine device protocol")
-		return nil
-	}
-
-	if protocol == "ATA" {
-		// ATA device on MegaRAID
-		if ataSmartAttributes, ok := result["ata_smart_attributes"].(map[string]interface{}); ok {
-			if table, ok := ataSmartAttributes["table"].([]interface{}); ok {
-				for _, item := range table {
-					if attr, ok := item.(map[string]interface{}); ok {
-						name, _ := attr["name"].(string)
-						value, _ := attr["value"].(float64)
-						raw, _ := attr["raw"].(map[string]interface{})
-						rawString, _ := raw["string"].(string)
-						rawValue := parseRawValue(rawString)
-
-						attributes[name] = value
-						if rawValue != nil {
-							attributes[name+"_raw"] = *rawValue
-						}
-					}
-				}
-			}
-		}
-	} else if protocol == "SCSI" {
-		// SCSI device on MegaRAID
-		// Parse JSON data recursive
-		parseAttributes("", result, attributes)
-	}
-
-	// Remove unused keys
-	delete(attributes, "json_format_version")
-	delete(attributes, "smartctl")
-	delete(attributes, "device")
-	delete(attributes, "ata_smart_attributes")
-	delete(attributes, "scsi_grown_defect_list")
-	delete(attributes, "scsi_error_counter_log")
-	delete(attributes, "smart_status")
-
-	// Log exported attributes
-	log.Printf("Attributes for MegaRAID device %s: %+v", dev, attributes)
 
 	return attributes
 }
