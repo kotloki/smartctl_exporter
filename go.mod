@@ -1,4 +1,4 @@
-module github.com/yourusername/smartctl_exporter
+module github.com/kotloki/smartctl_exporter
 
 go 1.18
 
